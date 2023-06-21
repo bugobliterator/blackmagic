@@ -285,6 +285,35 @@ static const struct {
 	{0xfff, 0x00, 0, aa_end, cidc_unknown, ARM_COMPONENT_STR("end", "end")},
 };
 
+#ifdef ENABLE_DEBUG
+const char *adiv5_ap_type[] = {
+	"AHB3-AP",
+	"APB2/3-AP",
+	"AXI3/4-AP",
+	"AHB5-AP",
+	"APB4/5-AP",
+	"AXI5-AP",
+	"AHB5-AP",
+};
+
+const char *adiv5_ap_map_type(const uint8_t ap_type, const uint8_t ap_class)
+{
+	/* type 0 APs are determined by the class code */
+	if (ap_type == 0U) {
+		if (ap_class == 0U)
+			return "JTAG-AP";
+		if (ap_class == 1U)
+			return "COM-AP";
+		return "Reserved";
+	}
+	/* Anything type code less than 9U can be straight looked up in the table above */
+	if (ap_type < 9U)
+		return adiv5_ap_type[ap_type - 1U];
+	/* type 9U+ is reserved */
+	return "Reserved";
+}
+#endif
+
 /* Used to probe for a protected SAMX5X device */
 #define SAMX5X_DSU_CTRLSTAT 0x41002100U
 #define SAMX5X_STATUSB_PROT (1U << 16U)
@@ -564,8 +593,8 @@ static void adiv5_component_probe(
 			DEBUG_ERROR("Fault reading ROM table entry\n");
 		}
 
-		DEBUG_INFO("ROM: Table BASE=0x%" PRIx32 " SYSMEM=0x%08" PRIx32 ", Manufacturer %3x Partno %3x\n", addr, memtype,
-			designer_code, part_number);
+		DEBUG_INFO("ROM: Table BASE=0x%" PRIx32 " SYSMEM=0x%08" PRIx32 ", Manufacturer %03x Partno %03x\n", addr,
+			memtype, designer_code, part_number);
 #endif
 		for (uint32_t i = 0; i < 960U; i++) {
 			adiv5_dp_error(ap->dp);
@@ -616,7 +645,7 @@ static void adiv5_component_probe(
 				arm_component_lut[i].arch_id != arch_id)
 				continue;
 
-			DEBUG_INFO("%s%" PRIu32 " 0x%" PRIx32 ": %s - %s %s (PIDR = 0x%08" PRIx32 "%08" PRIx32 "  DEVTYPE = 0x%02x "
+			DEBUG_INFO("%s%" PRIu32 " 0x%" PRIx32 ": %s - %s %s (PIDR = 0x%08" PRIx32 "%08" PRIx32 " DEVTYPE = 0x%02x "
 					   "ARCHID = 0x%04x)\n",
 				indent + 1, num_entry, addr, cidc_debug_strings[cid_class], arm_component_lut[i].type,
 				arm_component_lut[i].full, (uint32_t)(pidr >> 32U), (uint32_t)pidr, dev_type, arch_id);
@@ -679,11 +708,12 @@ adiv5_access_port_s *adiv5_new_ap(adiv5_debug_port_s *dp, uint8_t apsel)
 	if (!tmpap.idr) /* IDR Invalid */
 		return NULL;
 	tmpap.csw = adiv5_ap_read(&tmpap, ADIV5_AP_CSW);
-	tmpap.csw &= ~(ADIV5_AP_CSW_SIZE_MASK | ADIV5_AP_CSW_ADDRINC_MASK);
+	// XXX: We might be able to use the type field in ap->idr to determine if the AP supports TrustZone
+	tmpap.csw &= ~(ADIV5_AP_CSW_SIZE_MASK | ADIV5_AP_CSW_ADDRINC_MASK | ADIV5_AP_CSW_HNOSEC);
 	tmpap.csw |= ADIV5_AP_CSW_DBGSWENABLE;
 
 	if (tmpap.csw & ADIV5_AP_CSW_TRINPROG) {
-		DEBUG_ERROR("AP %d: Transaction in progress. AP is not usable!\n", apsel);
+		DEBUG_ERROR("AP %3u: Transaction in progress. AP is not usable!\n", apsel);
 		return NULL;
 	}
 
@@ -697,10 +727,20 @@ adiv5_access_port_s *adiv5_new_ap(adiv5_debug_port_s *dp, uint8_t apsel)
 	memcpy(ap, &tmpap, sizeof(*ap));
 
 #if defined(ENABLE_DEBUG)
+	/* Grab the config register to get a complete set */
 	uint32_t cfg = adiv5_ap_read(ap, ADIV5_AP_CFG);
-	DEBUG_INFO("AP %3d: IDR=%08" PRIx32 " CFG=%08" PRIx32 " BASE=%08" PRIx32 " CSW=%08" PRIx32, apsel, ap->idr, cfg,
+	DEBUG_INFO("AP %3u: IDR=%08" PRIx32 " CFG=%08" PRIx32 " BASE=%08" PRIx32 " CSW=%08" PRIx32, apsel, ap->idr, cfg,
 		ap->base, ap->csw);
-	DEBUG_INFO(" (AHB-AP var%" PRIx32 " rev%" PRIx32 ")\n", (ap->idr >> 4U) & 0xfU, ap->idr >> 28U);
+	/* Decode the AP designer code */
+	uint16_t designer = ADIV5_AP_IDR_DESIGNER(ap->idr);
+	designer = (designer & ADIV5_DP_DESIGNER_JEP106_CONT_MASK) << 1U | (designer & ADIV5_DP_DESIGNER_JEP106_CODE_MASK);
+	/* If this is an ARM-designed AP, map the AP type. Otherwise display "UNKNOWN" */
+	const char *const ap_type = designer == JEP106_MANUFACTURER_ARM ?
+		adiv5_ap_map_type(ADIV5_AP_IDR_TYPE(ap->idr), ADIV5_AP_IDR_CLASS(ap->idr)) :
+		"UNKNOWN";
+	/* Display the AP's type, variant and revision information */
+	DEBUG_INFO(" (%s var%" PRIx32 " rev%" PRIx32 ")\n", ap_type, ADIV5_AP_IDR_VARIANT(ap->idr),
+		ADIV5_AP_IDR_REVISION(ap->idr));
 #endif
 	adiv5_ap_ref(ap);
 	return ap;

@@ -132,7 +132,8 @@
 
 /* AP Control and Status Word (CSW) */
 #define ADIV5_AP_CSW_DBGSWENABLE (1U << 31U)
-/* Bits 30:24 - Prot, Implementation defined, for Cortex-M3: */
+/* Bits 30:24 - Prot, Implementation defined, for Cortex-M: */
+#define ADIV5_AP_CSW_HNOSEC           (1U << 30U)
 #define ADIV5_AP_CSW_MASTERTYPE_DEBUG (1U << 29U)
 #define ADIV5_AP_CSW_HPROT1           (1U << 25U)
 #define ADIV5_AP_CSW_SPIDEN           (1U << 23U)
@@ -153,6 +154,23 @@
 /* AP Debug Base Address Register (BASE) */
 #define ADIV5_AP_BASE_BASEADDR UINT32_C(0xfffff000)
 #define ADIV5_AP_BASE_PRESENT  (1U << 0U)
+
+/* AP Identification Register (IDR) */
+#define ADIV5_AP_IDR_REVISION_OFFSET 28U
+#define ADIV5_AP_IDR_REVISION_MASK   0xf0000000U
+#define ADIV5_AP_IDR_REVISION(idr)   (((idr)&ADIV5_AP_IDR_REVISION_MASK) >> ADIV5_AP_IDR_REVISION_OFFSET)
+#define ADIV5_AP_IDR_DESIGNER_OFFSET 17U
+#define ADIV5_AP_IDR_DESIGNER_MASK   0x0ffe0000U
+#define ADIV5_AP_IDR_DESIGNER(idr)   (((idr)&ADIV5_AP_IDR_DESIGNER_MASK) >> ADIV5_AP_IDR_DESIGNER_OFFSET)
+#define ADIV5_AP_IDR_CLASS_OFFSET    13U
+#define ADIV5_AP_IDR_CLASS_MASK      0x0001e000U
+#define ADIV5_AP_IDR_CLASS(idr)      (((idr)&ADIV5_AP_IDR_CLASS_MASK) >> ADIV5_AP_IDR_CLASS_OFFSET)
+#define ADIV5_AP_IDR_VARIANT_OFFSET  4U
+#define ADIV5_AP_IDR_VARIANT_MASK    0x000000f0U
+#define ADIV5_AP_IDR_VARIANT(idr)    (((idr)&ADIV5_AP_IDR_VARIANT_MASK) >> ADIV5_AP_IDR_VARIANT_OFFSET)
+#define ADIV5_AP_IDR_TYPE_OFFSET     0U
+#define ADIV5_AP_IDR_TYPE_MASK       0x0000000fU
+#define ADIV5_AP_IDR_TYPE(idr)       ((idr)&ADIV5_AP_IDR_TYPE_MASK)
 
 /* ADIv5 Class 0x1 ROM Table Registers */
 #define ADIV5_ROM_MEMTYPE          0xfccU
