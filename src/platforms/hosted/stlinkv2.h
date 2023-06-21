@@ -33,6 +33,7 @@
 #define STLINK_ERROR_FAIL        (-1)
 
 bool stlink_init(void);
+void stlink_deinit(void);
 uint32_t stlink_swd_scan(void);
 uint32_t stlink_jtag_scan(void);
 int stlink_hwversion(void);
