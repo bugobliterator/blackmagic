@@ -36,6 +36,7 @@
 #include "target.h"
 #include "target_internal.h"
 #include "cortexm.h"
+#include "spi.h"
 #include "sfdp.h"
 
 /*
@@ -124,39 +125,6 @@
 #define IMXRT_FLEXSPI_LUT_OP_READ         0x09U
 #define IMXRT_FLEXSPI_LUT_OP_WRITE        0x08U
 
-#define IMXRT_SPI_FLASH_OPCODE_MASK      0x000000ffU
-#define IMXRT_SPI_FLASH_OPCODE(x)        ((x)&IMXRT_SPI_FLASH_OPCODE_MASK)
-#define IMXRT_SPI_FLASH_DUMMY_MASK       0x0000ff00U
-#define IMXRT_SPI_FLASH_DUMMY_SHIFT      8U
-#define IMXRT_SPI_FLASH_DUMMY_LEN(x)     (((x) << IMXRT_SPI_FLASH_DUMMY_SHIFT) & IMXRT_SPI_FLASH_DUMMY_MASK)
-#define IMXRT_SPI_FLASH_OPCODE_MODE_MASK 0x00010000U
-#define IMXRT_SPI_FLASH_OPCODE_ONLY      (0U << 16U)
-#define IMXRT_SPI_FLASH_OPCODE_3B_ADDR   (1U << 16U)
-#define IMXRT_SPI_FLASH_DATA_IN          (0U << 17U)
-#define IMXRT_SPI_FLASH_DATA_OUT         (1U << 17U)
-
-#define SPI_FLASH_OPCODE_SECTOR_ERASE 0x20U
-#define SPI_FLASH_CMD_WRITE_ENABLE \
-	(IMXRT_SPI_FLASH_OPCODE_ONLY | IMXRT_SPI_FLASH_DUMMY_LEN(0) | IMXRT_SPI_FLASH_OPCODE(0x06U))
-#define SPI_FLASH_CMD_PAGE_PROGRAM                                                              \
-	(IMXRT_SPI_FLASH_OPCODE_3B_ADDR | IMXRT_SPI_FLASH_DATA_OUT | IMXRT_SPI_FLASH_DUMMY_LEN(0) | \
-		IMXRT_SPI_FLASH_OPCODE(0x02))
-#define SPI_FLASH_CMD_SECTOR_ERASE (IMXRT_SPI_FLASH_OPCODE_3B_ADDR | IMXRT_SPI_FLASH_DUMMY_LEN(0))
-#define SPI_FLASH_CMD_CHIP_ERASE \
-	(IMXRT_SPI_FLASH_OPCODE_ONLY | IMXRT_SPI_FLASH_DUMMY_LEN(0) | IMXRT_SPI_FLASH_OPCODE(0x60U))
-#define SPI_FLASH_CMD_READ_STATUS                                                           \
-	(IMXRT_SPI_FLASH_OPCODE_ONLY | IMXRT_SPI_FLASH_DATA_IN | IMXRT_SPI_FLASH_DUMMY_LEN(0) | \
-		IMXRT_SPI_FLASH_OPCODE(0x05U))
-#define SPI_FLASH_CMD_READ_JEDEC_ID                                                         \
-	(IMXRT_SPI_FLASH_OPCODE_ONLY | IMXRT_SPI_FLASH_DATA_IN | IMXRT_SPI_FLASH_DUMMY_LEN(0) | \
-		IMXRT_SPI_FLASH_OPCODE(0x9fU))
-#define SPI_FLASH_CMD_READ_SFDP                                                                \
-	(IMXRT_SPI_FLASH_OPCODE_3B_ADDR | IMXRT_SPI_FLASH_DATA_IN | IMXRT_SPI_FLASH_DUMMY_LEN(8) | \
-		IMXRT_SPI_FLASH_OPCODE(0x5aU))
-
-#define SPI_FLASH_STATUS_BUSY          0x01U
-#define SPI_FLASH_STATUS_WRITE_ENABLED 0x02U
-
 typedef enum imxrt_boot_src {
 	BOOT_FLEX_SPI,
 	boot_sd_card,
@@ -174,62 +142,18 @@ typedef struct imxrt_priv {
 	imxrt_boot_src_e boot_source;
 	uint32_t mpu_state;
 	uint32_t flexspi_lut_state;
-	uint32_t flexspi_cached_commands[4];
+	uint16_t flexspi_cached_commands[4];
 	imxrt_flexspi_lut_insn_s flexspi_prg_seq_state[4][8];
 } imxrt_priv_s;
-
-typedef struct imxrt_spi_flash {
-	target_flash_s flash;
-	uint32_t page_size;
-	uint8_t sector_erase_opcode;
-} imxrt_spi_flash_s;
 
 static imxrt_boot_src_e imxrt_boot_source(uint32_t boot_cfg);
 static bool imxrt_enter_flash_mode(target_s *target);
 static bool imxrt_exit_flash_mode(target_s *target);
-static uint8_t imxrt_spi_build_insn_sequence(target_s *target, uint32_t command, uint16_t length);
-static void imxrt_spi_read(target_s *target, uint32_t command, target_addr_t address, void *buffer, uint16_t length);
+static uint8_t imxrt_spi_build_insn_sequence(target_s *target, uint16_t command, uint16_t length);
+static void imxrt_spi_read(target_s *target, uint16_t command, target_addr_t address, void *buffer, size_t length);
 static void imxrt_spi_write(
-	target_s *target, uint32_t command, target_addr_t address, const void *buffer, uint16_t length);
-static bool imxrt_spi_mass_erase(target_s *target);
-static bool imxrt_spi_flash_erase(target_flash_s *flash, target_addr_t addr, size_t length);
-static bool imxrt_spi_flash_write(target_flash_s *flash, target_addr_t dest, const void *src, size_t length);
-
-static void imxrt_spi_read_sfdp(target_s *const target, const uint32_t address, void *const buffer, const size_t length)
-{
-	imxrt_spi_read(target, SPI_FLASH_CMD_READ_SFDP, address, buffer, length);
-}
-
-static void imxrt_add_flash(target_s *const target, const size_t length)
-{
-	imxrt_spi_flash_s *spi_flash = calloc(1, sizeof(*spi_flash));
-	if (!spi_flash) { /* calloc failed: heap exhaustion */
-		DEBUG_WARN("calloc: failed in %s\n", __func__);
-		return;
-	}
-
-	spi_parameters_s spi_parameters;
-	if (!sfdp_read_parameters(target, &spi_parameters, imxrt_spi_read_sfdp)) {
-		/* SFDP readout failed, so make some assumptions and hope for the best. */
-		spi_parameters.page_size = 256U;
-		spi_parameters.sector_size = 4096U;
-		spi_parameters.capacity = length;
-		spi_parameters.sector_erase_opcode = SPI_FLASH_OPCODE_SECTOR_ERASE;
-	}
-	DEBUG_INFO("Flash size: %" PRIu32 "MiB\n", (uint32_t)spi_parameters.capacity / (1024U * 1024U));
-
-	target_flash_s *const flash = &spi_flash->flash;
-	flash->start = IMXRT_FLEXSPI_BASE;
-	flash->length = spi_parameters.capacity;
-	flash->blocksize = spi_parameters.sector_size;
-	flash->write = imxrt_spi_flash_write;
-	flash->erase = imxrt_spi_flash_erase;
-	flash->erased = 0xffU;
-	target_add_flash(target, flash);
-
-	spi_flash->page_size = spi_parameters.page_size;
-	spi_flash->sector_erase_opcode = spi_parameters.sector_erase_opcode;
-}
+	target_s *target, uint16_t command, target_addr_t address, const void *buffer, size_t length);
+static void imxrt_spi_run_command(target_s *target, uint16_t command, target_addr_t address);
 
 bool imxrt_probe(target_s *const target)
 {
@@ -283,7 +207,7 @@ bool imxrt_probe(target_s *const target)
 		spi_flash_id_s flash_id;
 		imxrt_spi_read(target, SPI_FLASH_CMD_READ_JEDEC_ID, 0, &flash_id, sizeof(flash_id));
 
-		target->mass_erase = imxrt_spi_mass_erase;
+		target->mass_erase = bmp_spi_mass_erase;
 		target->enter_flash_mode = imxrt_enter_flash_mode;
 		target->exit_flash_mode = imxrt_exit_flash_mode;
 
@@ -292,7 +216,8 @@ bool imxrt_probe(target_s *const target)
 			const uint32_t capacity = 1U << flash_id.capacity;
 			DEBUG_INFO("SPI Flash: mfr = %02x, type = %02x, capacity = %08" PRIx32 "\n", flash_id.manufacturer,
 				flash_id.type, capacity);
-			imxrt_add_flash(target, capacity);
+			bmp_spi_add_flash(
+				target, IMXRT_FLEXSPI_BASE, capacity, imxrt_spi_read, imxrt_spi_write, imxrt_spi_run_command);
 		} else
 			DEBUG_INFO("Flash identification failed\n");
 
@@ -379,7 +304,7 @@ static bool imxrt_exit_flash_mode(target_s *const target)
 	return true;
 }
 
-static uint8_t imxrt_spi_build_insn_sequence(target_s *const target, const uint32_t command, const uint16_t length)
+static uint8_t imxrt_spi_build_insn_sequence(target_s *const target, const uint16_t command, const uint16_t length)
 {
 	imxrt_priv_s *const priv = (imxrt_priv_s *)target->target_storage;
 	/* Check if the command is already cached */
@@ -400,23 +325,24 @@ static uint8_t imxrt_spi_build_insn_sequence(target_s *const target, const uint3
 	imxrt_flexspi_lut_insn_s sequence[8] = {};
 	/* Start by writing the command opcode to the Flash */
 	sequence[0].opcode_mode = IMXRT_FLEXSPI_LUT_OPCODE(IMXRT_FLEXSPI_LUT_OP_COMMAND) | IMXRT_FLEXSPI_LUT_MODE_SERIAL;
-	sequence[0].value = command & IMXRT_SPI_FLASH_OPCODE_MASK;
+	sequence[0].value = command & SPI_FLASH_OPCODE_MASK;
 	uint8_t offset = 1;
 	/* Then, if the command has an address, perform the necessary addressing */
-	if ((command & IMXRT_SPI_FLASH_OPCODE_MODE_MASK) == IMXRT_SPI_FLASH_OPCODE_3B_ADDR) {
+	if ((command & SPI_FLASH_OPCODE_MODE_MASK) == SPI_FLASH_OPCODE_3B_ADDR) {
 		sequence[offset].opcode_mode =
 			IMXRT_FLEXSPI_LUT_OPCODE(IMXRT_FLEXSPI_LUT_OP_RADDR) | IMXRT_FLEXSPI_LUT_MODE_SERIAL;
 		sequence[offset++].value = 24U;
 	}
 	/* If the command uses dummy cycles, include the command for those */
-	if (command & IMXRT_SPI_FLASH_DUMMY_MASK) {
+	if (command & SPI_FLASH_DUMMY_MASK) {
 		sequence[offset].opcode_mode =
 			IMXRT_FLEXSPI_LUT_OPCODE(IMXRT_FLEXSPI_LUT_OP_DUMMY_CYCLES) | IMXRT_FLEXSPI_LUT_MODE_SERIAL;
-		sequence[offset++].value = (command & IMXRT_SPI_FLASH_DUMMY_MASK) >> IMXRT_SPI_FLASH_DUMMY_SHIFT;
+		/* Convert bytes to bits in the process of building this */
+		sequence[offset++].value = ((command & SPI_FLASH_DUMMY_MASK) >> SPI_FLASH_DUMMY_SHIFT) * 8U;
 	}
 	/* Now run the data phase based on the operation's data direction */
 	if (length) {
-		if (command & IMXRT_SPI_FLASH_DATA_OUT)
+		if (command & SPI_FLASH_DATA_OUT)
 			sequence[offset].opcode_mode =
 				IMXRT_FLEXSPI_LUT_OPCODE(IMXRT_FLEXSPI_LUT_OP_WRITE) | IMXRT_FLEXSPI_LUT_MODE_SERIAL;
 		else
@@ -442,7 +368,7 @@ static void imxrt_spi_exec_sequence(
 	const imxrt_priv_s *const priv = (imxrt_priv_s *)target->target_storage;
 	const uint32_t command = priv->flexspi_cached_commands[slot];
 	/* Write the address, if any, to the sequence address register */
-	if ((command & IMXRT_SPI_FLASH_OPCODE_MODE_MASK) == IMXRT_SPI_FLASH_OPCODE_3B_ADDR)
+	if ((command & SPI_FLASH_OPCODE_MODE_MASK) == SPI_FLASH_OPCODE_3B_ADDR)
 		target_mem_write32(target, IMXRT_FLEXSPI1_PRG_CTRL0, address);
 	/* Write the command data length and instruction sequence index */
 	target_mem_write32(
@@ -475,8 +401,8 @@ static void imxrt_spi_wait_complete(target_s *const target)
  * XXX: This routine cannot handle reads larger than 128 bytes.
  * This doesn't currently matter but may need fixing in the future
  */
-static void imxrt_spi_read(target_s *const target, const uint32_t command, const target_addr_t address,
-	void *const buffer, const uint16_t length)
+static void imxrt_spi_read(target_s *const target, const uint16_t command, const target_addr_t address,
+	void *const buffer, const size_t length)
 {
 	/* Configure the programmable sequence LUT and execute the read */
 	const uint8_t slot = imxrt_spi_build_insn_sequence(target, command, length);
@@ -489,8 +415,8 @@ static void imxrt_spi_read(target_s *const target, const uint32_t command, const
 	target_mem_write32(target, IMXRT_FLEXSPI1_INT, IMXRT_FLEXSPI1_INT_READ_FIFO_FULL);
 }
 
-static void imxrt_spi_write(target_s *const target, const uint32_t command, const target_addr_t address,
-	const void *const buffer, const uint16_t length)
+static void imxrt_spi_write(target_s *const target, const uint16_t command, const target_addr_t address,
+	const void *const buffer, const size_t length)
 {
 	/* Configure the programmable sequence LUT */
 	const uint8_t slot = imxrt_spi_build_insn_sequence(target, command, length);
@@ -511,74 +437,11 @@ static void imxrt_spi_write(target_s *const target, const uint32_t command, cons
 	imxrt_spi_wait_complete(target);
 }
 
-static inline uint8_t imxrt_spi_read_status(target_s *const target)
-{
-	uint8_t status = 0;
-	imxrt_spi_read(target, SPI_FLASH_CMD_READ_STATUS, 0, &status, sizeof(status));
-	return status;
-}
-
-static inline void imxrt_spi_run_command(target_s *const target, const uint32_t command, const target_addr_t address)
+static void imxrt_spi_run_command(target_s *const target, const uint16_t command, const target_addr_t address)
 {
 	/* Configure the programmable sequence LUT */
 	const uint8_t slot = imxrt_spi_build_insn_sequence(target, command, 0U);
 	imxrt_spi_exec_sequence(target, slot, address, 0U);
 	/* Now wait for the FlexSPI controller to indicate the command completed we're done */
 	imxrt_spi_wait_complete(target);
-}
-
-static bool imxrt_spi_mass_erase(target_s *const target)
-{
-	platform_timeout_s timeout;
-	platform_timeout_set(&timeout, 500);
-	imxrt_enter_flash_mode(target);
-	imxrt_spi_run_command(target, SPI_FLASH_CMD_WRITE_ENABLE, 0U);
-	if (!(imxrt_spi_read_status(target) & SPI_FLASH_STATUS_WRITE_ENABLED)) {
-		imxrt_exit_flash_mode(target);
-		return false;
-	}
-
-	imxrt_spi_run_command(target, SPI_FLASH_CMD_CHIP_ERASE, 0U);
-	while (imxrt_spi_read_status(target) & SPI_FLASH_STATUS_BUSY)
-		target_print_progress(&timeout);
-
-	return imxrt_exit_flash_mode(target);
-}
-
-static bool imxrt_spi_flash_erase(target_flash_s *const flash, const target_addr_t addr, const size_t length)
-{
-	target_s *const target = flash->t;
-	const imxrt_spi_flash_s *const spi_flash = (imxrt_spi_flash_s *)flash;
-	const target_addr_t begin = addr - flash->start;
-	for (size_t offset = 0; offset < length; offset += flash->blocksize) {
-		imxrt_spi_run_command(target, SPI_FLASH_CMD_WRITE_ENABLE, 0U);
-		if (!(imxrt_spi_read_status(target) & SPI_FLASH_STATUS_WRITE_ENABLED))
-			return false;
-
-		imxrt_spi_run_command(target,
-			SPI_FLASH_CMD_SECTOR_ERASE | IMXRT_SPI_FLASH_OPCODE(spi_flash->sector_erase_opcode), begin + offset);
-		while (imxrt_spi_read_status(target) & SPI_FLASH_STATUS_BUSY)
-			continue;
-	}
-	return true;
-}
-
-static bool imxrt_spi_flash_write(
-	target_flash_s *const flash, const target_addr_t dest, const void *const src, const size_t length)
-{
-	target_s *const target = flash->t;
-	const imxrt_spi_flash_s *const spi_flash = (imxrt_spi_flash_s *)flash;
-	const target_addr_t begin = dest - flash->start;
-	const char *const buffer = src;
-	for (size_t offset = 0; offset < length; offset += spi_flash->page_size) {
-		imxrt_spi_run_command(target, SPI_FLASH_CMD_WRITE_ENABLE, 0U);
-		if (!(imxrt_spi_read_status(target) & SPI_FLASH_STATUS_WRITE_ENABLED))
-			return false;
-
-		const size_t amount = MIN(length - offset, spi_flash->page_size);
-		imxrt_spi_write(target, SPI_FLASH_CMD_PAGE_PROGRAM, begin + offset, buffer + offset, amount);
-		while (imxrt_spi_read_status(target) & SPI_FLASH_STATUS_BUSY)
-			continue;
-	}
-	return true;
 }

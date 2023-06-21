@@ -1,7 +1,7 @@
 /*
  * This file is part of the Black Magic Debug project.
  *
- * Copyright (C) 2022 1BitSquared <info@1bitsquared.com>
+ * Copyright (C) 2023 1BitSquared <info@1bitsquared.com>
  * Written by Rachel Mant <git@dragonmux.network>
  * All rights reserved.
  *
@@ -31,30 +31,19 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef TARGET_SFDP_H
-#define TARGET_SFDP_H
+#ifndef INCLUDE_SPI_TYPES_H
+#define INCLUDE_SPI_TYPES_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
+typedef enum spi_device {
+	SPI_DEVICE_INT_FLASH = 0,
+	SPI_DEVICE_EXT_FLASH = 1,
+	SPI_DEVICE_SDCARD = 2,
+	SPI_DEVICE_DISPLAY = 3,
+} spi_device_e;
 
-#include "target.h"
+typedef enum spi_bus {
+	SPI_BUS_EXTERNAL = 0,
+	SPI_BUS_INTERNAL = 1,
+} spi_bus_e;
 
-typedef struct spi_flash_id {
-	uint8_t manufacturer;
-	uint8_t type;
-	uint8_t capacity;
-} spi_flash_id_s;
-
-typedef struct spi_parameters {
-	uint32_t page_size;
-	uint32_t sector_size;
-	size_t capacity;
-	uint8_t sector_erase_opcode;
-} spi_parameters_s;
-
-typedef void (*spi_read_func)(target_s *target, uint16_t command, target_addr_t address, void *buffer, size_t length);
-
-bool sfdp_read_parameters(target_s *target, spi_parameters_s *params, spi_read_func spi_read);
-
-#endif /* TARGET_SFDP_H */
+#endif /* INCLUDE_SPI_TYPES_H */

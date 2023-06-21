@@ -32,7 +32,9 @@
 #include <libopencm3/stm32/exti.h>
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/usb/usbd.h>
+#include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/adc.h>
+#include <libopencm3/stm32/spi.h>
 #include <libopencm3/stm32/flash.h>
 
 static void adc_init(void);
@@ -137,6 +139,7 @@ int platform_hwversion(void)
 
 void platform_init(void)
 {
+	const int hwversion = platform_hwversion();
 	SCS_DEMCR |= SCS_DEMCR_VC_MON_EN;
 
 	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -145,7 +148,7 @@ void platform_init(void)
 	rcc_periph_clock_enable(RCC_USB);
 	rcc_periph_clock_enable(RCC_GPIOA);
 	rcc_periph_clock_enable(RCC_GPIOB);
-	if (platform_hwversion() >= 6)
+	if (hwversion >= 6)
 		rcc_periph_clock_enable(RCC_GPIOC);
 	rcc_periph_clock_enable(RCC_AFIO);
 	rcc_periph_clock_enable(RCC_CRC);
@@ -165,7 +168,7 @@ void platform_init(void)
 	gpio_port_write(GPIOA, 0x8182);
 	gpio_port_write(GPIOB, 0x2002);
 
-	if (platform_hwversion() >= 6) {
+	if (hwversion >= 6) {
 		gpio_set_mode(TCK_DIR_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TCK_DIR_PIN);
 		gpio_set_mode(TCK_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, TCK_PIN);
 		gpio_clear(TCK_DIR_PORT, TCK_DIR_PIN);
@@ -180,10 +183,9 @@ void platform_init(void)
 	 */
 	platform_nrst_set_val(false);
 	gpio_set_mode(NRST_PORT, GPIO_MODE_OUTPUT_50_MHZ,
-		platform_hwversion() == 0 || platform_hwversion() >= 3 ? GPIO_CNF_OUTPUT_PUSHPULL : GPIO_CNF_OUTPUT_OPENDRAIN,
-		NRST_PIN);
+		hwversion == 0 || hwversion >= 3 ? GPIO_CNF_OUTPUT_PUSHPULL : GPIO_CNF_OUTPUT_OPENDRAIN, NRST_PIN);
 	/* FIXME: Gareth, Esden, what versions need this fix? */
-	if (platform_hwversion() < 3)
+	if (hwversion < 3)
 		/*
 		 * FIXME: This pin in intended to be input, but the TXS0108 fails
 		 * to release the device from reset if this floats.
@@ -197,15 +199,27 @@ void platform_init(void)
 	 * Enable internal pull-up on PWR_BR so that we don't drive
 	 * TPWR locally or inadvertently supply power to the target.
 	 */
-	if (platform_hwversion() == 1) {
+	if (hwversion == 1) {
 		gpio_set(PWR_BR_PORT, PWR_BR_PIN);
 		gpio_set_mode(PWR_BR_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, PWR_BR_PIN);
-	} else if (platform_hwversion() > 1) {
+	} else if (hwversion > 1) {
 		gpio_set(PWR_BR_PORT, PWR_BR_PIN);
 		gpio_set_mode(PWR_BR_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_OPENDRAIN, PWR_BR_PIN);
 	}
 
-	if (platform_hwversion() > 0)
+	if (hwversion >= 5) {
+		gpio_set_mode(AUX_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, AUX_SCLK | AUX_COPI);
+		gpio_set_mode(AUX_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, AUX_FCS | AUX_SDCS);
+		gpio_set_mode(AUX_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, AUX_CIPO);
+		gpio_set(AUX_PORT, AUX_FCS | AUX_SDCS);
+		/* hw6 introduced an SD Card chip select on PB6, moving the display select to PB7 */
+		if (hwversion >= 6) {
+			gpio_set_mode(AUX_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, AUX_DCS6);
+			gpio_set(AUX_PORT, AUX_DCS6);
+		}
+	}
+
+	if (hwversion > 0)
 		adc_init();
 	else {
 		gpio_clear(GPIOB, GPIO0);
@@ -221,7 +235,7 @@ void platform_init(void)
 	 * On hardware version 1 and 2, UART and SWD share connector pins.
 	 * Don't enable UART if we're being debugged.
 	 */
-	if (platform_hwversion() == 0 || platform_hwversion() >= 3 || !(SCS_DEMCR & SCS_DEMCR_TRCENA))
+	if (hwversion == 0 || hwversion >= 3 || !(SCS_DEMCR & SCS_DEMCR_TRCENA))
 		aux_serial_init();
 
 	setup_vbus_irq();
@@ -254,7 +268,7 @@ bool platform_target_get_power(void)
 {
 	if (platform_hwversion() > 0)
 		return !gpio_get(PWR_BR_PORT, PWR_BR_PIN);
-	return 0;
+	return false;
 }
 
 void platform_target_set_power(const bool power)
@@ -347,6 +361,73 @@ void platform_target_clk_output_enable(bool enable)
 		if (enable)
 			gpio_set_mode(TCK_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TCK_PIN);
 	}
+}
+
+bool platform_spi_init(const spi_bus_e bus)
+{
+	if (bus == SPI_BUS_EXTERNAL) {
+		rcc_periph_clock_enable(RCC_SPI1);
+		rcc_periph_reset_pulse(RST_SPI1);
+		platform_target_clk_output_enable(true);
+		gpio_set_mode(TCK_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, TCK_PIN);
+		gpio_set_mode(TDI_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, TDI_PIN);
+		gpio_set(TMS_DIR_PORT, TMS_DIR_PIN);
+	} else {
+		rcc_periph_clock_enable(RCC_SPI2);
+		rcc_periph_reset_pulse(RST_SPI2);
+	}
+
+	const uint32_t controller = bus == SPI_BUS_EXTERNAL ? EXT_SPI : AUX_SPI;
+	spi_init_master(controller, SPI_CR1_BAUDRATE_FPCLK_DIV_8, SPI_CR1_CPOL_CLK_TO_0_WHEN_IDLE,
+		SPI_CR1_CPHA_CLK_TRANSITION_1, SPI_CR1_DFF_8BIT, SPI_CR1_MSBFIRST);
+	spi_enable(controller);
+	return true;
+}
+
+bool platform_spi_deinit(spi_bus_e bus)
+{
+	spi_disable(bus == SPI_BUS_EXTERNAL ? EXT_SPI : AUX_SPI);
+
+	if (bus == SPI_BUS_EXTERNAL) {
+		rcc_periph_clock_disable(RCC_SPI1);
+		gpio_set_mode(TCK_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TCK_PIN);
+		gpio_set_mode(TDI_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TDI_PIN);
+		platform_target_clk_output_enable(false);
+	} else
+		rcc_periph_clock_disable(RCC_SPI2);
+	return true;
+}
+
+bool platform_spi_chip_select(const uint8_t device_select)
+{
+	const uint8_t device = device_select & 0x7fU;
+	const bool select = !(device_select & 0x80U);
+	uint32_t port = AUX_PORT;
+	uint16_t pin;
+	switch (device) {
+	case SPI_DEVICE_INT_FLASH:
+		pin = AUX_FCS;
+		break;
+	case SPI_DEVICE_EXT_FLASH:
+		port = EXT_SPI_CS_PORT;
+		pin = EXT_SPI_CS;
+		break;
+	case SPI_DEVICE_SDCARD:
+		pin = AUX_SDCS;
+		break;
+	case SPI_DEVICE_DISPLAY:
+		pin = AUX_DCS;
+		break;
+	default:
+		return false;
+	}
+	gpio_set_val(port, pin, select);
+	return true;
+}
+
+uint8_t platform_spi_xfer(const spi_bus_e bus, const uint8_t value)
+{
+	return spi_xfer(bus == SPI_BUS_EXTERNAL ? EXT_SPI : AUX_SPI, value);
 }
 
 void exti15_10_isr(void)
