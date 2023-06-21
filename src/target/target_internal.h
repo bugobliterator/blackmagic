@@ -94,7 +94,6 @@ struct breakwatch {
 #define MAX_CMDLINE 81
 
 struct target {
-	bool attached;
 	target_controller_s *tc;
 
 	/* Attach/Detach functions */
@@ -135,7 +134,7 @@ struct target {
 	bool flash_mode;
 
 	/* Target-defined options */
-	unsigned target_options;
+	uint32_t target_options;
 
 	void *target_storage;
 
@@ -170,6 +169,8 @@ struct target {
 	 * fallback to AP partno
 	 */
 	uint16_t part_id;
+
+	bool attached;
 };
 
 void target_print_progress(platform_timeout_s *timeout);
